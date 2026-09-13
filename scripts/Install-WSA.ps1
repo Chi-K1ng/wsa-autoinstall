@@ -39,6 +39,30 @@ Import-Module (Join-Path $PSScriptRoot 'WsaExtras.psm1') -Force
 
 $Host.UI.RawUI.WindowTitle = 'WSA Auto-Install'
 
+# Log everything to a file so a failure on someone else's machine can be
+# reported by sending one file rather than retyping console output.
+$script:LogPath = Join-Path $env:TEMP ("wsa-autoinstall-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
+try { Start-Transcript -Path $script:LogPath -Force | Out-Null } catch { $script:LogPath = $null }
+
+function Stop-Log {
+    if ($script:LogPath) { try { Stop-Transcript | Out-Null } catch { } }
+}
+
+# Any terminating error lands here: say what broke, where the log is, stop.
+trap {
+    Write-Host ''
+    Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    if ($_.InvocationInfo.ScriptLineNumber) {
+        Write-Host "  at line $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor DarkGray
+    }
+    if ($script:LogPath) {
+        Write-Host ''
+        Write-Host "  Full log: $script:LogPath" -ForegroundColor Yellow
+    }
+    Stop-Log
+    exit 1
+}
+
 function Read-YesNo {
     param([string]$Question, [string]$Default = 'Yes')
     if ($Unattended) { return $Default -eq 'Yes' }
@@ -93,7 +117,7 @@ $InstallDir = (Resolve-Path $InstallDir).Path
 $free = (Get-PSDrive -Name (Split-Path $InstallDir -Qualifier).TrimEnd(':')).Free
 if ($free -lt 8GB) {
     Write-Warn ('Only {0} GB free here; about 8 GB is needed for the download plus the extracted build.' -f [math]::Round($free / 1GB, 1))
-    if (-not (Read-YesNo 'Continue anyway?' 'No')) { exit 1 }
+    if (-not (Read-YesNo 'Continue anyway?' 'No')) { Stop-Log; exit 1 }
 }
 Write-Ok "Installing to $InstallDir"
 
@@ -115,6 +139,7 @@ $needReboot = Enable-WsaPrereq
 if ($needReboot) {
     Write-Warn 'VirtualMachinePlatform was just enabled and Windows must restart before WSA can run.'
     Write-Info 'Restart, then run this installer again - it resumes from the download.'
+    Stop-Log
     if (Read-YesNo 'Restart now?' 'No') { Restart-Computer -Force }
     exit 0
 }
@@ -225,4 +250,6 @@ if ($adbExe) {
 }
 Write-Host ''
 Write-Host '  WSA is ready.' -ForegroundColor Green
+if ($script:LogPath) { Write-Info "Log: $script:LogPath" }
 Write-Host ''
+Stop-Log

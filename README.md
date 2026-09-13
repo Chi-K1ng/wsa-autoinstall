@@ -130,3 +130,9 @@ All the actual WSA images are built and maintained by
 only automates fetching and setting them up — it redistributes nothing.
 
 Licensed under **AGPL-3.0-or-later**, matching upstream. See [LICENSE](LICENSE).
+
+## Reporting a problem
+
+Every run writes a transcript to `%TEMP%\wsa-autoinstall-<timestamp>.log`. On a failure
+the script prints the exact path. Attach the newest one to an issue — it captures the
+release and variant chosen, every step taken, and the full error with its line number.

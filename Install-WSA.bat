@@ -34,6 +34,7 @@ if "%RC%"=="0" (
     echo   Finished.
 ) else (
     echo   Exited with code %RC%.
+    echo   Logs are in %%TEMP%%\wsa-autoinstall-*.log - send the newest one when reporting a problem.
 )
 pause
 exit /b %RC%
