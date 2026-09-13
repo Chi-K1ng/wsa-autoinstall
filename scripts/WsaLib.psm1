@@ -377,8 +377,23 @@ function Expand-Wsa7z {
     $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
     $canTar = $false
     if (Test-Path $tar) {
-        & $tar -tf $Archive 2>&1 | Out-Null
-        $canTar = ($LASTEXITCODE -eq 0)
+        # Piping a native command's stderr with 2>&1 makes PowerShell 5.1 wrap
+        # every line in a NativeCommandError, which is fatal under the Stop
+        # preference the orchestrator sets - so a build whose .7z bsdtar cannot
+        # read killed the run here instead of falling through to 7zr, leaving
+        # the bundled copy unreachable. Send the output to files and judge the
+        # probe by its exit code alone.
+        $probeOut = Join-Path $env:TEMP ('wsa-probe-{0}.out' -f $PID)
+        $probeErr = Join-Path $env:TEMP ('wsa-probe-{0}.err' -f $PID)
+        try {
+            $probe = Start-Process -FilePath $tar -ArgumentList @('-tf', $Archive) -NoNewWindow -PassThru -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+            $null = $probe.Handle
+            $probe.WaitForExit()
+            $canTar = ($probe.ExitCode -eq 0)
+        } catch {
+            $canTar = $false
+        }
+        Remove-Item $probeOut, $probeErr -Force -ErrorAction SilentlyContinue
     }
 
     if ($canTar) {
@@ -404,8 +419,12 @@ function Expand-Wsa7z {
 
     # Neither extractor reports progress usefully, and this is several minutes
     # of writing. Run it as a child process and measure the tree as it grows.
+    # Both get a log to write to: without one, whatever the extractor said about
+    # a failure is lost and all we can report back is a bare exit code.
+    $errLog = Join-Path $env:TEMP ('wsa-extract-{0}.err' -f $PID)
+    $outLog = Join-Path $env:TEMP ('wsa-extract-{0}.out' -f $PID)
     $baseline = Measure-TreeBytes $Destination
-    $proc = Start-Process -FilePath $exe -ArgumentList $eArgs -NoNewWindow -PassThru
+    $proc = Start-Process -FilePath $exe -ArgumentList $eArgs -NoNewWindow -PassThru -RedirectStandardError $errLog -RedirectStandardOutput $outLog
     # Touching Handle caches it, without which ExitCode reads back empty once
     # the process is gone and every extraction looks like a failure.
     $null = $proc.Handle
@@ -417,7 +436,27 @@ function Expand-Wsa7z {
     }
     $proc.WaitForExit()
     Complete-Status
-    if ($proc.ExitCode -ne 0) { throw "Extraction failed ($what exit $($proc.ExitCode))." }
+
+    $said = @()
+    if (Test-Path $errLog) {
+        $said = @(Get-Content -LiteralPath $errLog -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() })
+    }
+    Remove-Item $errLog, $outLog -Force -ErrorAction SilentlyContinue
+
+    # Both bsdtar and 7zr document exit 1 as "done, but something was worth
+    # mentioning" and reserve 2 and above for real failures. An elevated run
+    # earns a warning just for not being able to put POSIX ownership onto NTFS,
+    # so treating 1 as fatal fails an extraction that in fact completed. What
+    # decides success here is the AppxManifest.xml check further down.
+    if ($proc.ExitCode -ge 2 -or $proc.ExitCode -lt 0) {
+        $why = ''
+        if ($said) { $why = ' - ' + (($said | Select-Object -First 5) -join '; ') }
+        throw "Extraction failed ($what exit $($proc.ExitCode))$why"
+    }
+    if ($proc.ExitCode -eq 1) {
+        Write-Warn ('{0} finished with warnings; checking the result anyway' -f $what)
+        $said | Select-Object -First 5 | ForEach-Object { Write-Info $_ }
+    }
     $total = [Math]::Max([double]0, (Measure-TreeBytes $Destination) - $baseline)
     Write-Ok ('Unpacked {0} in {1}' -f (Format-Bytes $total), (Format-Span $sw.Elapsed))
 
