@@ -15,6 +15,12 @@
     .\Install-WSA.ps1 -InstallDir D:\WSA -Unattended
     Root + Play Store, adb on PATH, PacMan registered, no prompts.
 
+.EXAMPLE
+    .\Install-WSA.ps1 -Archive D:\WSA\WSA_2407.40000.4.0_x64_Release-Nightly.7z
+    Offline: uses a build already on disk, so nothing is downloaded and the
+    GitHub API is never contacted. A WSA_*.7z dropped in vendor\ is found
+    on its own, without the parameter.
+
 .NOTES
     Copyright (C) 2026  Chi-K1ng
     Licensed under the GNU Affero General Public License v3.0 or later.
@@ -22,6 +28,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir,
+    [string]$Archive,
     [ValidateSet('Yes', 'No')][string]$Root      = 'Yes',
     [ValidateSet('Yes', 'No')][string]$GApps     = 'Yes',
     [ValidateSet('Yes', 'No')][string]$Amazon    = 'No',
@@ -155,21 +162,52 @@ if ($needReboot) {
 
 # ------------------------------------------------------------ 5. release --
 
-Write-Step 'Finding the newest build'
-$release = Get-WsaRelease -IsWin11 $hostInfo.IsWin11 -Arm64 $hostInfo.Arm64
-Write-Ok "Release $($release.tag_name)"
+Write-Step 'Finding the build to install'
 
-$variants = Get-WsaVariant -Release $release
-$variant  = Select-WsaVariant -Variants $variants `
-                -WantRoot ($Root -eq 'Yes') -WantGApps ($GApps -eq 'Yes') -WantAmazon ($Amazon -eq 'Yes')
-Write-Ok "Variant: $($variant.Label)  ($($variant.SizeMB) MB)"
-Write-Info $variant.Name
+# A .7z already on disk skips both the API call and the 700 MB download, so
+# it is checked first - an explicit -Archive is taken as given, while one
+# found by searching is offered rather than assumed.
+$localArchive = Find-LocalWsaArchive -Path $Archive -InstallDir $InstallDir
+if ($localArchive -and -not $Archive) {
+    Write-Info ('Found a build already on this PC: {0}' -f (Split-Path $localArchive -Leaf))
+    if (-not (Read-YesNo 'Use it instead of downloading?' 'Yes')) { $localArchive = $null }
+}
+
+if ($localArchive) {
+    $variant = ConvertTo-WsaVariant -Name (Split-Path $localArchive -Leaf) `
+                   -Size (Get-Item -LiteralPath $localArchive).Length -LocalPath $localArchive
+    Write-Ok "Variant: $($variant.Label)  ($($variant.SizeMB) MB)"
+    Write-Info $variant.Name
+    # The file decides what gets installed, so the answers above no longer do.
+    if ($variant.Root -ne ($Root -eq 'Yes') -or $variant.GApps -ne ($GApps -eq 'Yes')) {
+        Write-Warn 'This build does not match the root / Play Store options chosen above - the file wins.'
+        $Root  = if ($variant.Root)  { 'Yes' } else { 'No' }
+        $GApps = if ($variant.GApps) { 'Yes' } else { 'No' }
+    }
+} else {
+    $release = Get-WsaRelease -IsWin11 $hostInfo.IsWin11 -Arm64 $hostInfo.Arm64
+    Write-Ok "Release $($release.tag_name)"
+
+    $variants = Get-WsaVariant -Release $release
+    $variant  = Select-WsaVariant -Variants $variants `
+                    -WantRoot ($Root -eq 'Yes') -WantGApps ($GApps -eq 'Yes') -WantAmazon ($Amazon -eq 'Yes')
+    Write-Ok "Variant: $($variant.Label)  ($($variant.SizeMB) MB)"
+    Write-Info $variant.Name
+}
 
 # ----------------------------------------------------------- 6. download --
 
-Write-Step 'Downloading'
-$archive = Join-Path $InstallDir $variant.Name
-Invoke-WsaDownload -Url $variant.Url -Destination $archive -ExpectedSize $variant.Size
+# Still a step either way, so the [n/13] numbering holds for both paths.
+if ($localArchive) {
+    Write-Step 'Using the build already on this PC'
+    $archive = $localArchive
+    Write-Ok ('Nothing to download - {0} on disk' -f (Format-Bytes $variant.Size))
+    Write-Info $archive
+} else {
+    Write-Step 'Downloading'
+    $archive = Join-Path $InstallDir $variant.Name
+    Invoke-WsaDownload -Url $variant.Url -Destination $archive -ExpectedSize $variant.Size
+}
 
 # ------------------------------------------------------------ 7. extract --
 
@@ -181,7 +219,10 @@ $packageDir = Expand-Wsa7z -Archive $archive -Destination $InstallDir
 Write-Step 'Installing the WSA package'
 Install-WsaPackage -PackageDir $packageDir
 
-if (-not $KeepArchive) {
+# Only a download is ours to clean up; an archive the user supplied stays.
+if ($localArchive) {
+    Write-Info "Left your archive where it was: $archive"
+} elseif (-not $KeepArchive) {
     Remove-Item $archive -Force -ErrorAction SilentlyContinue
     Write-Info 'Removed the downloaded archive (pass -KeepArchive to keep it)'
 }

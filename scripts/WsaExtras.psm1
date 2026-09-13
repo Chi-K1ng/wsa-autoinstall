@@ -159,36 +159,46 @@ function Install-WsaPacman {
       Registers the .apk/.xapk double-click handler. The installer is an
       unsigned Inno Setup build, so SmartScreen will flag it; the portable
       zip avoids that but registers no file associations.
+
+      The installer build is bundled under vendor/, so the common path needs
+      no network at all. Anything not bundled - the portable zip, by default -
+      still resolves through the GitHub API.
     #>
     param([string]$Repo = 'alesimula/wsa_pacman', [switch]$Portable, [string]$PortableDir)
 
-    $headers = @{ 'User-Agent' = 'wsa-autoinstall'; 'Accept' = 'application/vnd.github+json' }
-    if ($env:GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
-    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
+    if ($Portable -and -not $PortableDir) { throw 'PortableDir is required for a portable install.' }
+
+    $wanted  = if ($Portable) { '*portable*.zip' } else { '*installer*.exe' }
+    $package = Get-VendorFile "WSA-pacman-$wanted"
+    $isTemp  = $false
+
+    if ($package) {
+        Write-Info "Using the bundled $(Split-Path $package -Leaf)"
+    } else {
+        $headers = @{ 'User-Agent' = 'wsa-autoinstall'; 'Accept' = 'application/vnd.github+json' }
+        if ($env:GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
+
+        $asset = $rel.assets | Where-Object { $_.name -like $wanted } | Select-Object -First 1
+        if (-not $asset) { throw "No PacMan build matching $wanted in the latest release." }
+
+        $package = Join-Path $env:TEMP $asset.name
+        $isTemp  = $true
+        Write-Info "Downloading WSA PacMan $($rel.tag_name)"
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $package -UseBasicParsing
+    }
 
     if ($Portable) {
-        $asset = $rel.assets | Where-Object { $_.name -like '*portable*.zip' } | Select-Object -First 1
-        if (-not $asset) { throw 'No portable PacMan build in the latest release.' }
-        if (-not $PortableDir) { throw 'PortableDir is required for a portable install.' }
-
-        $zip = Join-Path $env:TEMP $asset.name
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
-        Expand-Archive -Path $zip -DestinationPath $PortableDir -Force
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        Expand-Archive -Path $package -DestinationPath $PortableDir -Force
+        # Only a temp download is ours to delete; a vendored copy stays put.
+        if ($isTemp) { Remove-Item $package -Force -ErrorAction SilentlyContinue }
         Write-Ok "WSA PacMan (portable) at $PortableDir - no .apk association registered"
         return
     }
 
-    $asset = $rel.assets | Where-Object { $_.name -like '*installer*.exe' } | Select-Object -First 1
-    if (-not $asset) { throw 'No PacMan installer in the latest release.' }
-
-    $exe = Join-Path $env:TEMP $asset.name
-    Write-Info "Downloading WSA PacMan $($rel.tag_name)"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exe -UseBasicParsing
-
     Write-Info 'Installing silently'
-    $p = Start-Process -FilePath $exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
-    Remove-Item $exe -Force -ErrorAction SilentlyContinue
+    $p = Start-Process -FilePath $package -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+    if ($isTemp) { Remove-Item $package -Force -ErrorAction SilentlyContinue }
 
     if ($p.ExitCode -ne 0) { throw "PacMan installer exited with $($p.ExitCode)." }
     Write-Ok 'WSA PacMan installed - .apk and .xapk now install on double-click'

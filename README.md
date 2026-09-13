@@ -20,8 +20,9 @@ Install-WSA.bat        <- double-click this
 1. Checks the Windows build, architecture and free disk space.
 2. Enables `VirtualMachinePlatform` and the sideloading unlock, and tells you if a
    reboot is needed.
-3. Asks the GitHub API for the newest WSABuilds release matching your OS and
-   architecture — so it never goes stale as upstream publishes new builds.
+3. Uses a WSA `.7z` already on the machine if there is one, otherwise asks the
+   GitHub API for the newest WSABuilds release matching your OS and architecture —
+   so it never goes stale as upstream publishes new builds.
 4. Picks the right variant from the release's cryptic filenames based on whether you
    want root, the Play Store and the Amazon Appstore.
 5. Downloads it, resumably. Ctrl+C is safe; rerunning continues where it stopped.
@@ -61,6 +62,34 @@ written into the install folder, and a countdown while the VM comes up. The
 window stays open at the end, and every run is written to
 `%TEMP%\wsa-autoinstall-<timestamp>.log`.
 
+## Running it offline
+
+Everything the installer needs except the WSA image itself is **committed under
+[`vendor/`](vendor/)**, so a plain *Download ZIP* of this repo carries its own
+`7zr.exe`, Google platform-tools and WSA PacMan installer. Nothing but the image
+is fetched at run time, and a DNS blip can no longer kill the run three steps in.
+
+The image can't ride along — WSABuilds `.7z` files are 700 MB to 1 GB and GitHub
+rejects any file over 100 MB — but you only need to get it onto the machine once:
+
+```powershell
+# either drop a WSA_*.7z into vendor\ and just run the installer,
+# or point at one anywhere:
+.\scripts\Install-WSA.ps1 -Archive D:\downloads\WSA_2407.40000.4.0_x64_Release-Nightly.7z
+```
+
+With an archive supplied, the GitHub API is never contacted and step 6 becomes
+*"Using the build already on this PC"*. A `WSA_*.7z` found on its own in `vendor\`,
+the repo root or the install folder is offered rather than assumed — answer `n`
+and it downloads the newest build instead.
+
+The filename decides what you get, so the root and Play Store prompts no longer
+apply; if your answers disagree with the archive, the installer says so and
+follows the file.
+
+Deleting anything from `vendor/` is safe — each one falls back to the download it
+replaced.
+
 ## Requirements
 
 - Windows 10 build 19045+ or Windows 11 build 22000+, x64 or arm64
@@ -76,11 +105,13 @@ Every prompt is also a parameter:
 .\scripts\Install-WSA.ps1 -InstallDir D:\WSA -Unattended
 .\scripts\Install-WSA.ps1 -InstallDir D:\WSA -Root No -Amazon Yes -Pacman No -Unattended
 .\scripts\Install-WSA.ps1 -PacmanPortable -KeepArchive
+.\scripts\Install-WSA.ps1 -Archive D:\WSA\WSA_2407.40000.4.0_x64_Release-Nightly.7z -Unattended
 ```
 
 | Parameter | Default | Meaning |
 |---|---|---|
 | `-InstallDir` | `C:\WSA` | Where WSA lives permanently |
+| `-Archive` | auto | Install from a `.7z` already on disk; skips the API and the download |
 | `-Root` | `Yes` | Pick a Magisk build and grant su to the shell |
 | `-GApps` | `Yes` | Google Play Store |
 | `-Amazon` | `No` | Amazon Appstore |
@@ -113,7 +144,7 @@ WinRT property set — `$ls.Values['x'] = $y` throws `CannotIndex`.
 
 `C:\Windows\System32\tar.exe` is bsdtar, and current Windows builds carry libarchive
 3.4+, which reads 7-Zip archives. No 7-Zip install needed. Older hosts fall back to
-downloading `7zr.exe`.
+`7zr.exe`, which ships in [`vendor/`](vendor/) so even that path needs no network.
 
 ### Granting root
 
@@ -155,7 +186,11 @@ Magisk → Superuser and enable Shell by hand — everything else is already don
 All the actual WSA images are built and maintained by
 [MustardChef/WSABuilds](https://github.com/MustardChef/WSABuilds), which builds on
 [LSPosed/MagiskOnWSALocal](https://github.com/LSPosed/MagiskOnWSALocal). This project
-only automates fetching and setting them up — it redistributes nothing.
+only automates fetching and setting them up — no WSA image is redistributed here.
+
+The three small third-party tools in [`vendor/`](vendor/) *are* redistributed, with
+versions, checksums, upstream links and licences listed in
+[`vendor/README.md`](vendor/README.md).
 
 Licensed under **AGPL-3.0-or-later**, matching upstream. See [LICENSE](LICENSE).
 

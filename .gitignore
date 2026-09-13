@@ -1,4 +1,8 @@
+# Build output and user-supplied images, never the bundled vendor files.
 *.7z
 *.zip
 platform-tools/
 WSA_*/
+
+!vendor/platform-tools-latest-windows.zip
+vendor/*.7z

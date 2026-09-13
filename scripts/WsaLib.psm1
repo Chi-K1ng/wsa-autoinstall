@@ -163,6 +163,34 @@ function Enable-WsaPrereq {
     $needReboot
 }
 
+# ----------------------------------------------------------------- vendor --
+#
+# The small third-party helpers are committed under vendor/, so a plain
+# "Download ZIP" of the repo installs with no network at all. Every fetch
+# looks here first and only falls back to the internet when nothing is
+# bundled, which also means deleting a vendored file just costs a download.
+
+function Get-VendorDir {
+    # scripts/ normally sits one level under the repo root, but a copied-out
+    # scripts/ folder with its own vendor/ works too - the layout is not
+    # load-bearing.
+    foreach ($dir in @((Join-Path (Split-Path $PSScriptRoot -Parent) 'vendor'),
+                       (Join-Path $PSScriptRoot 'vendor'))) {
+        if (Test-Path -LiteralPath $dir) { return (Resolve-Path -LiteralPath $dir).Path }
+    }
+    $null
+}
+
+function Get-VendorFile {
+    # Newest match for $Pattern, or $null when nothing is bundled.
+    param([Parameter(Mandatory)][string]$Pattern)
+    $dir = Get-VendorDir
+    if (-not $dir) { return $null }
+    $hit = Get-ChildItem -LiteralPath $dir -Filter $Pattern -File -ErrorAction SilentlyContinue |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($hit) { $hit.FullName } else { $null }
+}
+
 # --------------------------------------------------------------- releases --
 
 function Get-WsaRelease {
@@ -186,27 +214,62 @@ function Get-WsaRelease {
     $want
 }
 
+function ConvertTo-WsaVariant {
+    # Turns one cryptic WSABuilds filename into something choosable. Release
+    # assets and a .7z already sitting on disk both come through here, so an
+    # offline install describes itself exactly like a downloaded one.
+    param([Parameter(Mandatory)][string]$Name,
+          [string]$Url,
+          [long]$Size = 0,
+          [string]$LocalPath)
+
+    [pscustomobject]@{
+        Name      = $Name
+        Url       = $Url
+        LocalPath = $LocalPath
+        Size      = $Size
+        SizeMB    = [math]::Round($Size / 1MB)
+        Root      = [bool]($Name -match 'magisk')
+        Channel   = if ($Name -match '-(stable|canary)-') { $Matches[1] } else { $null }
+        GApps     = [bool]($Name -notmatch 'NoGApps')
+        Amazon    = [bool]($Name -notmatch 'NoAmazon')
+        Label     = (@(
+            if ($Name -match 'magisk')      { 'Magisk root' } else { 'no root' }
+            if ($Name -notmatch 'NoGApps')  { 'Play Store' }  else { 'no Play Store' }
+            if ($Name -notmatch 'NoAmazon') { 'Amazon Appstore' }
+        ) | Where-Object { $_ }) -join ' + '
+    }
+}
+
 function Get-WsaVariant {
-    # Turns the cryptic asset names into something choosable.
     param($Release)
     $Release.assets | Where-Object { $_.name -like '*.7z' } | ForEach-Object {
-        $n = $_.name
-        [pscustomobject]@{
-            Name    = $n
-            Url     = $_.browser_download_url
-            Size    = [long]$_.size
-            SizeMB  = [math]::Round($_.size / 1MB)
-            Root    = [bool]($n -match 'magisk')
-            Channel = if ($n -match '-(stable|canary)-') { $Matches[1] } else { $null }
-            GApps   = [bool]($n -notmatch 'NoGApps')
-            Amazon  = [bool]($n -notmatch 'NoAmazon')
-            Label   = (@(
-                if ($n -match 'magisk')      { 'Magisk root' } else { 'no root' }
-                if ($n -notmatch 'NoGApps')  { 'Play Store' }  else { 'no Play Store' }
-                if ($n -notmatch 'NoAmazon') { 'Amazon Appstore' }
-            ) | Where-Object { $_ }) -join ' + '
-        }
+        ConvertTo-WsaVariant -Name $_.name -Url $_.browser_download_url -Size ([long]$_.size)
     }
+}
+
+function Find-LocalWsaArchive {
+    <#
+      Finds a WSABuilds .7z already on this PC, which skips both the release
+      lookup and the 700 MB download - the whole point of the offline path.
+      An explicit -Path wins; otherwise vendor/, the repo root and the install
+      folder are searched, largest file first so a part-downloaded leftover
+      does not beat the real one.
+    #>
+    param([string]$Path, [string]$InstallDir)
+
+    if ($Path) {
+        if (-not (Test-Path -LiteralPath $Path)) { throw "No archive at $Path." }
+        return (Resolve-Path -LiteralPath $Path).Path
+    }
+
+    $roots = @((Get-VendorDir), (Split-Path $PSScriptRoot -Parent), $InstallDir)
+    foreach ($r in ($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) })) {
+        $hit = Get-ChildItem -LiteralPath $r -Filter 'WSA_*.7z' -File -ErrorAction SilentlyContinue |
+               Sort-Object Length -Descending | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
+    $null
 }
 
 function Select-WsaVariant {
@@ -311,10 +374,16 @@ function Expand-Wsa7z {
         $eArgs = @('-xf', $Archive, '-C', $Destination)
         $what = 'bsdtar'
     } else {
-        Write-Warn 'Built-in tar cannot read .7z on this build; fetching 7zr.exe'
-        $7zr = Join-Path $env:TEMP '7zr.exe'
-        if (-not (Test-Path $7zr)) {
-            Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $7zr -UseBasicParsing
+        Write-Warn 'Built-in tar cannot read .7z on this build; using 7zr.exe instead'
+        $7zr = Get-VendorFile '7zr.exe'
+        if ($7zr) {
+            Write-Info 'Using the bundled 7zr.exe'
+        } else {
+            $7zr = Join-Path $env:TEMP '7zr.exe'
+            if (-not (Test-Path $7zr)) {
+                Write-Info 'Downloading 7zr.exe from 7-zip.org'
+                Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $7zr -UseBasicParsing
+            }
         }
         $exe  = $7zr
         $eArgs = @('x', $Archive, "-o$Destination", '-y', '-bso0')
@@ -440,12 +509,19 @@ function Install-PlatformTools {
     if (Test-Path $adb) {
         Write-Ok 'platform-tools already present'
     } else {
-        $zip = Join-Path $env:TEMP 'platform-tools.zip'
-        Write-Info 'Downloading Google platform-tools'
-        Invoke-WebRequest -Uri 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip' `
-            -OutFile $zip -UseBasicParsing
+        $bundled = Get-VendorFile 'platform-tools-*.zip'
+        if ($bundled) {
+            $zip = $bundled
+            Write-Info 'Using the bundled platform-tools'
+        } else {
+            $zip = Join-Path $env:TEMP 'platform-tools.zip'
+            Write-Info 'Downloading Google platform-tools'
+            Invoke-WebRequest -Uri 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip' `
+                -OutFile $zip -UseBasicParsing
+        }
         Expand-Archive -Path $zip -DestinationPath $Destination -Force
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        # Only a temp copy is ours to delete; the vendored zip stays put.
+        if (-not $bundled) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
         if (-not (Test-Path $adb)) { throw 'platform-tools did not extract correctly.' }
         Write-Ok "Installed platform-tools to $Destination"
     }
