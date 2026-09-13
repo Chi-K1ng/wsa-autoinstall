@@ -4,10 +4,9 @@
 
 $script:AdbTarget = '127.0.0.1:58526'
 
-function Write-Step { param([string]$Text) Write-Host "`n==> $Text" -ForegroundColor Cyan }
-function Write-Ok   { param([string]$Text) Write-Host "    [ok] $Text" -ForegroundColor Green }
-function Write-Warn { param([string]$Text) Write-Host "    [!]  $Text" -ForegroundColor Yellow }
-function Write-Info { param([string]$Text) Write-Host "    $Text"      -ForegroundColor Gray }
+# The reporting helpers live in WsaLib. Defining a second copy here would
+# shadow them depending on import order, and the step counter would reset.
+Import-Module (Join-Path $PSScriptRoot 'WsaLib.psm1') -Force -DisableNameChecking
 
 # ------------------------------------------------------------ ui plumbing --
 

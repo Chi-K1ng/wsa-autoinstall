@@ -79,6 +79,15 @@ Write-Host @'
 
 '@ -ForegroundColor White
 
+# Steps that always run, plus the optional ones the caller asked for. The
+# count only drives the "[4/13]" labels, so an interactive answer that turns
+# one off later just means the run ends a step or two early.
+$steps = 9
+foreach ($opt in @($DevMode, $Adb, $Root, $Pacman)) { if ($opt -eq 'Yes') { $steps++ } }
+Start-WsaProgress -TotalSteps $steps
+Write-Info "This run has about $steps steps. Nothing here is silent for long -"
+Write-Info 'the slow ones (download, extract, install) report as they go.'
+
 # ------------------------------------------------------------- 1. checks --
 
 Write-Step 'Checking this PC'
@@ -249,7 +258,7 @@ if ($adbExe) {
     Write-Info '  adb -s 127.0.0.1:58526 install yourapp.apk'
 }
 Write-Host ''
-Write-Host '  WSA is ready.' -ForegroundColor Green
+Write-Host ('  WSA is ready - {0} from start to finish.' -f (Format-Span (Get-WsaElapsed))) -ForegroundColor Green
 if ($script:LogPath) { Write-Info "Log: $script:LogPath" }
 Write-Host ''
 Stop-Log

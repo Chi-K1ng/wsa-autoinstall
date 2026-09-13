@@ -7,10 +7,116 @@ $script:PFN       = 'MicrosoftCorporationII.WindowsSubsystemForAndroid_8wekyb3d8
 $script:AppAumid  = "shell:AppsFolder\$script:PFN!App"
 $script:AdbTarget = '127.0.0.1:58526'
 
-function Write-Step { param([string]$Text) Write-Host "`n==> $Text" -ForegroundColor Cyan }
-function Write-Ok   { param([string]$Text) Write-Host "    [ok] $Text" -ForegroundColor Green }
-function Write-Warn { param([string]$Text) Write-Host "    [!]  $Text" -ForegroundColor Yellow }
-function Write-Info { param([string]$Text) Write-Host "    $Text"      -ForegroundColor Gray }
+# -------------------------------------------------------------- progress --
+#
+# Everything the user sees goes through here. Two rules shape it:
+#
+#   * Steps are numbered "[4/13]" and timed, so a long silent stretch still
+#     reads as progress rather than a hang.
+#   * Live single-line updates are written with [Console]::Write, which
+#     Start-Transcript does not capture. A 700 MB download would otherwise
+#     become thousands of near-identical lines in the log.
+
+$script:StepNo    = 0
+$script:StepTotal = 0
+$script:StepStart = $null
+$script:RunStart  = $null
+$script:StatusOn  = $false
+
+function Start-WsaProgress {
+    param([int]$TotalSteps = 0)
+    $script:StepNo    = 0
+    $script:StepTotal = $TotalSteps
+    $script:StepStart = $null
+    $script:RunStart  = Get-Date
+}
+
+function Get-WsaElapsed {
+    if (-not $script:RunStart) { return [TimeSpan]::Zero }
+    (Get-Date) - $script:RunStart
+}
+
+function Format-Span {
+    param([TimeSpan]$Span)
+    if ($Span.TotalHours -ge 1) { '{0}h {1:00}m' -f [int]$Span.TotalHours, $Span.Minutes }
+    else { '{0}m {1:00}s' -f [int]$Span.TotalMinutes, $Span.Seconds }
+}
+
+function Format-Bytes {
+    param([double]$Bytes)
+    if ($Bytes -ge 1GB)     { '{0:N2} GB' -f ($Bytes / 1GB) }
+    elseif ($Bytes -ge 1MB) { '{0:N0} MB' -f ($Bytes / 1MB) }
+    else                    { '{0:N0} KB' -f ($Bytes / 1KB) }
+}
+
+function Test-CanDrawStatus {
+    # No console (output redirected or piped to a file) means no cursor to rewind.
+    try { -not [Console]::IsOutputRedirected } catch { $false }
+}
+
+function Get-ConsoleWidth {
+    try { [Math]::Max(40, [Console]::WindowWidth - 1) } catch { 79 }
+}
+
+function Write-Status {
+    # Overwrites the current line in place; silent when there is no console.
+    param([string]$Text)
+    if (-not (Test-CanDrawStatus)) { return }
+    $w    = Get-ConsoleWidth
+    $line = "    $Text"
+    if ($line.Length -gt $w) { $line = $line.Substring(0, $w) }
+    [Console]::Write("`r" + $line.PadRight($w))
+    $script:StatusOn = $true
+}
+
+function Complete-Status {
+    # Wipes the live line so the next real message starts on a clean row.
+    if ($script:StatusOn -and (Test-CanDrawStatus)) {
+        [Console]::Write("`r" + (' ' * (Get-ConsoleWidth)) + "`r")
+    }
+    $script:StatusOn = $false
+}
+
+function Write-Step {
+    param([string]$Text)
+    Complete-Status
+    if ($script:StepStart) {
+        Write-Host ('    done in {0}' -f (Format-Span ((Get-Date) - $script:StepStart))) -ForegroundColor DarkGray
+    }
+    $script:StepNo++
+    $tag = if ($script:StepTotal -gt 0) { '[{0}/{1}]' -f $script:StepNo, $script:StepTotal } else { '==>' }
+    Write-Host ''
+    Write-Host "  $tag $Text" -ForegroundColor Cyan
+    $script:StepStart = Get-Date
+}
+
+function Write-Ok   { param([string]$Text) Complete-Status; Write-Host "    [ok] $Text" -ForegroundColor Green }
+function Write-Warn { param([string]$Text) Complete-Status; Write-Host "    [!]  $Text" -ForegroundColor Yellow }
+function Write-Info { param([string]$Text) Complete-Status; Write-Host "    $Text"      -ForegroundColor Gray }
+
+function Wait-WithStatus {
+    <#
+      Polls until $Test returns true, showing a live countdown so a two minute
+      wait does not look like a freeze. Returns whether it ended up true.
+    #>
+    param(
+        [Parameter(Mandatory)][scriptblock]$Test,
+        [Parameter(Mandatory)][string]$Message,
+        [int]$TimeoutSeconds  = 120,
+        [int]$IntervalSeconds = 3
+    )
+    $sw   = [Diagnostics.Stopwatch]::StartNew()
+    $spin = [char[]]'|/-\'
+    $i    = 0
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        if (& $Test) { Complete-Status; return $true }
+        Write-Status ('{0} {1}  ({2} of {3}s)' -f $spin[$i++ % $spin.Length], $Message,
+                      (Format-Span $sw.Elapsed), $TimeoutSeconds)
+        Start-Sleep -Seconds $IntervalSeconds
+    }
+    Complete-Status
+    [bool](& $Test)
+}
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -149,20 +255,41 @@ function Invoke-WsaDownload {
         if ($have -gt $ExpectedSize) { Remove-Item $Destination -Force }
     }
 
-    # curl.exe ships with Win10 1803+ and resumes cleanly with -C -
+    if ($ExpectedSize -gt 0) { Write-Info ('Size {0}' -f (Format-Bytes $ExpectedSize)) }
+    Write-Info "To   $Destination"
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+
+    # curl.exe ships with Win10 1803+, resumes cleanly with -C -, and draws its
+    # own percent/speed/ETA meter on stderr - which the transcript ignores.
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (Test-Path $curl) {
-        Write-Info 'Downloading - Ctrl+C is safe, rerunning resumes where it stopped'
+        Write-Info 'Ctrl+C is safe here - rerunning resumes where it stopped'
+        Write-Host ''
         & $curl -L --fail --retry 3 --retry-delay 2 -C - -o $Destination $Url
         if ($LASTEXITCODE -ne 0) { throw "Download failed (curl exit $LASTEXITCODE)." }
+        Write-Host ''
     } else {
-        Write-Info 'Downloading'
+        Write-Info 'Downloading (no curl.exe on this host, so no live meter)'
         Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
     }
-    Write-Ok "Downloaded $([math]::Round((Get-Item $Destination).Length / 1MB)) MB"
+
+    $got  = (Get-Item $Destination).Length
+    $rate = if ($sw.Elapsed.TotalSeconds -gt 1) { ' at {0}/s' -f (Format-Bytes ($got / $sw.Elapsed.TotalSeconds)) } else { '' }
+    Write-Ok ('Downloaded {0} in {1}{2}' -f (Format-Bytes $got), (Format-Span $sw.Elapsed), $rate)
 }
 
 # ---------------------------------------------------------------- extract --
+
+function Measure-TreeBytes {
+    # Best effort: files are appearing underneath this while we count them, so
+    # errors are swallowed and the number is only ever used for display.
+    param([string]$Path)
+    try {
+        $sum = (Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum
+        if ($sum) { [double]$sum } else { [double]0 }
+    } catch { [double]0 }
+}
 
 function Expand-Wsa7z {
     # Windows' own bsdtar reads .7z when libarchive is 3.4+, which covers
@@ -180,18 +307,38 @@ function Expand-Wsa7z {
     }
 
     if ($canTar) {
-        Write-Info 'Extracting with the built-in bsdtar'
-        & $tar -xf $Archive -C $Destination
-        if ($LASTEXITCODE -ne 0) { throw "Extraction failed (tar exit $LASTEXITCODE)." }
+        $exe  = $tar
+        $eArgs = @('-xf', $Archive, '-C', $Destination)
+        $what = 'bsdtar'
     } else {
         Write-Warn 'Built-in tar cannot read .7z on this build; fetching 7zr.exe'
         $7zr = Join-Path $env:TEMP '7zr.exe'
         if (-not (Test-Path $7zr)) {
             Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $7zr -UseBasicParsing
         }
-        & $7zr x $Archive "-o$Destination" -y | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Extraction failed (7zr exit $LASTEXITCODE)." }
+        $exe  = $7zr
+        $eArgs = @('x', $Archive, "-o$Destination", '-y', '-bso0')
+        $what = '7zr'
     }
+
+    # Neither extractor reports progress usefully, and this is several minutes
+    # of writing. Run it as a child process and measure the tree as it grows.
+    $baseline = Measure-TreeBytes $Destination
+    $proc = Start-Process -FilePath $exe -ArgumentList $eArgs -NoNewWindow -PassThru
+    # Touching Handle caches it, without which ExitCode reads back empty once
+    # the process is gone and every extraction looks like a failure.
+    $null = $proc.Handle
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $proc.HasExited) {
+        $written = [Math]::Max([double]0, (Measure-TreeBytes $Destination) - $baseline)
+        Write-Status ('Extracting with {0} - {1} written, {2} elapsed' -f $what, (Format-Bytes $written), (Format-Span $sw.Elapsed))
+        Start-Sleep -Milliseconds 1500
+    }
+    $proc.WaitForExit()
+    Complete-Status
+    if ($proc.ExitCode -ne 0) { throw "Extraction failed ($what exit $($proc.ExitCode))." }
+    $total = [Math]::Max([double]0, (Measure-TreeBytes $Destination) - $baseline)
+    Write-Ok ('Unpacked {0} in {1}' -f (Format-Bytes $total), (Format-Span $sw.Elapsed))
 
     $root = Get-ChildItem $Destination -Directory |
         Where-Object { Test-Path (Join-Path $_.FullName 'AppxManifest.xml') } |
@@ -217,13 +364,18 @@ function Install-WsaPackage {
         Remove-AppxPackage -Package $existing.PackageFullName
     }
 
-    Write-Info 'Running the build''s own Install.ps1 - this takes a few minutes'
+    Write-Info 'Handing over to the build''s own Install.ps1 - this takes a few minutes'
+    Write-Info 'Everything between the rules below is upstream output, not ours.'
+    Write-Host ('    ' + ('-' * 58)) -ForegroundColor DarkGray
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     Push-Location $PackageDir
     try {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
     } finally {
         Pop-Location
     }
+    Write-Host ('    ' + ('-' * 58)) -ForegroundColor DarkGray
+    Write-Info ('Upstream installer finished in {0}' -f (Format-Span $sw.Elapsed))
 
     $pkg = Get-AppxPackage -Name $script:PkgName -ErrorAction SilentlyContinue
     if (-not $pkg) { throw 'The WSA package is not registered after install.' }
@@ -268,16 +420,17 @@ function Start-Wsa {
     #>
     param([int]$TimeoutSeconds = 120)
 
+    Write-Info 'Launching the WSA app, which is what actually boots the Android VM'
     Start-Process $script:AppAumid
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        Start-Sleep -Seconds 3
-        $svc = Get-Process WsaService -ErrorAction SilentlyContinue
-    } while (-not $svc -and (Get-Date) -lt $deadline)
 
-    if (-not $svc) { throw "WSA did not start within $TimeoutSeconds seconds." }
+    $up = Wait-WithStatus -Message 'Booting the Android VM' -TimeoutSeconds $TimeoutSeconds `
+                          -Test { [bool](Get-Process WsaService -ErrorAction SilentlyContinue) }
+    if (-not $up) { throw "WSA did not start within $TimeoutSeconds seconds." }
     Write-Ok 'WSA VM is running'
-    Start-Sleep -Seconds 10   # adbd binds a moment after WsaService appears
+
+    # adbd binds a moment after WsaService appears; a never-true test just
+    # burns the clock with something on screen.
+    $null = Wait-WithStatus -Message 'Letting adbd bind' -TimeoutSeconds 10 -IntervalSeconds 1 -Test { $false }
 }
 
 function Install-PlatformTools {
@@ -315,6 +468,7 @@ function Connect-Wsa {
     param([Parameter(Mandatory)][string]$Adb, [int]$Retries = 6)
 
     for ($i = 1; $i -le $Retries; $i++) {
+        Write-Status ('Connecting to {0} - attempt {1} of {2}' -f $script:AdbTarget, $i, $Retries)
         & $Adb connect $script:AdbTarget | Out-Null
         Start-Sleep -Seconds 3
         $state = (& $Adb -s $script:AdbTarget get-state 2>&1) -join ''
@@ -324,6 +478,7 @@ function Connect-Wsa {
         }
         Start-Sleep -Seconds 3
     }
+    Complete-Status
     Write-Warn "Could not reach an authorized adb state at $script:AdbTarget"
     $false
 }

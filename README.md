@@ -33,6 +33,34 @@ Install-WSA.bat        <- double-click this
 11. Installs [WSA PacMan](https://github.com/alesimula/wsa_pacman) so `.apk` and
     `.xapk` files install on double-click.
 
+## What you see while it runs
+
+It runs in a console window and reports the whole way through — every step is
+numbered and timed, and nothing goes quiet for more than a second or two:
+
+```
+  [6/13] Downloading
+    Size 740 MB
+    To   D:\WSA\WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk...7z
+    Ctrl+C is safe here - rerunning resumes where it stopped
+
+  % Total    % Received  Average Speed   Time    Time     Time  Current
+                          Dload  Upload  Total   Spent    Left  Speed
+ 47  740M   47  350M    0     0  38.4M      0  0:00:19  0:00:09  0:00:10 39.1M
+
+    [ok] Downloaded 740 MB in 0m 19s at 38.4 MB/s
+    done in 0m 21s
+
+  [7/13] Extracting
+    Extracting with bsdtar - 1.87 GB written, 0m 14s elapsed
+```
+
+The download meter is `curl`'s own. Extraction and the first boot have no
+progress to report of their own, so those lines are measured live — bytes
+written into the install folder, and a countdown while the VM comes up. The
+window stays open at the end, and every run is written to
+`%TEMP%\wsa-autoinstall-<timestamp>.log`.
+
 ## Requirements
 
 - Windows 10 build 19045+ or Windows 11 build 22000+, x64 or arm64
