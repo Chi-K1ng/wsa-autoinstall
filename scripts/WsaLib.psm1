@@ -223,21 +223,33 @@ function ConvertTo-WsaVariant {
           [long]$Size = 0,
           [string]$LocalPath)
 
+    # Every flag below is read from a token in the name, and each one is read
+    # from a token's *absence* as much as its presence - so a file someone
+    # renamed to wsa.7z parses as "no root, Play Store, Amazon" with no
+    # evidence for any of it. Worse, "no root" would then turn off the root
+    # grant for a build that does have Magisk. A name carrying none of the
+    # tokens is therefore marked unknown, and callers leave the user's own
+    # answers alone rather than trusting this.
+    $known = [bool]($Name -match 'magisk|GApps|NoAmazon')
+
     [pscustomobject]@{
         Name      = $Name
         Url       = $Url
         LocalPath = $LocalPath
         Size      = $Size
         SizeMB    = [math]::Round($Size / 1MB)
+        Known     = $known
         Root      = [bool]($Name -match 'magisk')
         Channel   = if ($Name -match '-(stable|canary)-') { $Matches[1] } else { $null }
         GApps     = [bool]($Name -notmatch 'NoGApps')
         Amazon    = [bool]($Name -notmatch 'NoAmazon')
-        Label     = (@(
-            if ($Name -match 'magisk')      { 'Magisk root' } else { 'no root' }
-            if ($Name -notmatch 'NoGApps')  { 'Play Store' }  else { 'no Play Store' }
-            if ($Name -notmatch 'NoAmazon') { 'Amazon Appstore' }
-        ) | Where-Object { $_ }) -join ' + '
+        Label     = if (-not $known) { 'contents not stated in the filename' } else {
+            (@(
+                if ($Name -match 'magisk')      { 'Magisk root' } else { 'no root' }
+                if ($Name -notmatch 'NoGApps')  { 'Play Store' }  else { 'no Play Store' }
+                if ($Name -notmatch 'NoAmazon') { 'Amazon Appstore' }
+            ) | Where-Object { $_ }) -join ' + '
+        }
     }
 }
 

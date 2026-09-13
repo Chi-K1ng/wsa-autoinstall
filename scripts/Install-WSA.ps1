@@ -178,8 +178,14 @@ if ($localArchive) {
                    -Size (Get-Item -LiteralPath $localArchive).Length -LocalPath $localArchive
     Write-Ok "Variant: $($variant.Label)  ($($variant.SizeMB) MB)"
     Write-Info $variant.Name
-    # The file decides what gets installed, so the answers above no longer do.
-    if ($variant.Root -ne ($Root -eq 'Yes') -or $variant.GApps -ne ($GApps -eq 'Yes')) {
+    # The file decides what gets installed, so the answers above no longer do -
+    # but only when the filename actually says. A renamed archive says nothing,
+    # and reading "no root" out of that would skip the root grant on a build
+    # that has Magisk.
+    if (-not $variant.Known) {
+        Write-Warn 'This filename does not say what the build contains, so your answers above are kept.'
+        Write-Info 'Rename it to the WSABuilds original if root or the Play Store look wrong afterwards.'
+    } elseif ($variant.Root -ne ($Root -eq 'Yes') -or $variant.GApps -ne ($GApps -eq 'Yes')) {
         Write-Warn 'This build does not match the root / Play Store options chosen above - the file wins.'
         $Root  = if ($variant.Root)  { 'Yes' } else { 'No' }
         $GApps = if ($variant.GApps) { 'Yes' } else { 'No' }
