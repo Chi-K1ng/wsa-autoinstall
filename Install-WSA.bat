@@ -10,7 +10,19 @@ title WSA Auto-Install
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo Requesting administrator rights...
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
+    rem Passed through the environment, not the command line, so that paths
+    rem or arguments containing quotes and spaces survive the trip into PowerShell.
+    set "WSA_ELEV_SELF=%~f0"
+    set "WSA_ELEV_ARGS=%*"
+    powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try { if ([string]::IsNullOrWhiteSpace($env:WSA_ELEV_ARGS)) { Start-Process -FilePath $env:WSA_ELEV_SELF -Verb RunAs } else { Start-Process -FilePath $env:WSA_ELEV_SELF -ArgumentList $env:WSA_ELEV_ARGS -Verb RunAs } } catch { exit 1 }"
+    if errorlevel 1 (
+        echo.
+        echo   ERROR: could not restart with administrator rights.
+        echo   Approve the User Account Control prompt, or right-click this
+        echo   file and choose "Run as administrator".
+        echo.
+        pause
+    )
     exit /b
 )
 
