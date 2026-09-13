@@ -1,0 +1,4 @@
+*.7z
+*.zip
+platform-tools/
+WSA_*/
