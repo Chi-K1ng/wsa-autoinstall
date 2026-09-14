@@ -258,6 +258,10 @@ if ($Adb -eq 'Yes') {
     if (-not $connected) {
         Write-Info 'Accept the RSA prompt in the WSA window, then run:'
         Write-Info "  `"$adbExe`" connect 127.0.0.1:58526"
+    } else {
+        # adb answering does not mean Android is up; the APK verifier can be
+        # minutes behind it, and installs fail until it arrives.
+        $null = Wait-WsaFramework -Adb $adbExe
     }
 }
 
@@ -300,9 +304,14 @@ if ($adbExe) {
     $state = (& $adbExe -s 127.0.0.1:58526 get-state 2>&1) -join ''
     Write-Info "adb              $state  at 127.0.0.1:58526"
     Write-Info "Root             $(Test-WsaRoot -Adb $adbExe)"
+    Write-Info "APK verifier     $(if (Test-WsaFrameworkReady -Adb $adbExe) { 'up - installs will work' } else { 'not up yet - open an Android app first' })"
     Write-Host ''
     Write-Info 'This PC may have more than one adb device attached, so target WSA explicitly:'
     Write-Info '  adb -s 127.0.0.1:58526 install yourapp.apk'
+    Write-Host ''
+    Write-Info 'If an install stalls and then fails with INSTALL_FAILED_VERIFICATION_FAILURE, the'
+    Write-Info 'Android framework is not up. Open any app in WSA and check with:'
+    Write-Info '  adb -s 127.0.0.1:58526 shell pidof com.microsoft.windows.userapp'
 }
 Write-Host ''
 Write-Host ('  WSA is ready - {0} from start to finish.' -f (Format-Span (Get-WsaElapsed))) -ForegroundColor Green

@@ -94,6 +94,14 @@ function Grant-WsaRoot {
     #>
     param([Parameter(Mandatory)][string]$Adb)
 
+    # su works against the native daemon long before Android is up, but the
+    # Magisk UI this drives does not exist until the framework has started -
+    # without this, Wait-WsaFocus just burns its timeout on an empty screen.
+    if (-not (Wait-WsaFramework -Adb $Adb)) {
+        Write-Warn 'Android is not up yet, so the Magisk UI cannot be driven'
+        return $false
+    }
+
     $state = Test-WsaRoot -Adb $Adb
     if ($state -eq 'granted') { Write-Ok 'Root already granted to Shell'; return $true }
     Write-Info "Current su state: $state"

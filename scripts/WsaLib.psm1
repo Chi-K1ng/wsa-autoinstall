@@ -546,7 +546,9 @@ function Start-Wsa {
     $up = Wait-WithStatus -Message 'Booting the Android VM' -TimeoutSeconds $TimeoutSeconds `
                           -Test { [bool](Get-Process WsaService -ErrorAction SilentlyContinue) }
     if (-not $up) { throw "WSA did not start within $TimeoutSeconds seconds." }
-    Write-Ok 'WSA VM is running'
+    # The VM being up is only the native half - see Wait-WsaFramework for why
+    # this is not yet enough to install an APK.
+    Write-Ok 'WSA VM is running (the Android framework starts later)'
 
     # adbd binds a moment after WsaService appears; a never-true test just
     # burns the clock with something on screen.
@@ -607,5 +609,61 @@ function Connect-Wsa {
     }
     Complete-Status
     Write-Warn "Could not reach an authorized adb state at $script:AdbTarget"
+    $false
+}
+
+function Test-WsaFrameworkReady {
+    <#
+      Whether an APK install can actually succeed right now.
+
+      com.microsoft.windows.userapp owns PackageVerificationReceiver, which
+      has to answer ACTION_PACKAGE_NEEDS_VERIFICATION. adbd and magiskd are
+      native and bind minutes before that process exists, so neither a live
+      WsaService nor a working `adb connect` says anything about readiness -
+      and until the verifier is up, PackageManager waits out its 120 second
+      deadline and every install fails with:
+
+          INSTALL_FAILED_VERIFICATION_FAILURE: Install not allowed
+
+      Measured on a WSABuilds LTS #8 box: VM and adbd at T+0, the framework
+      and this process only at T+5m39s, when an app was finally launched.
+    #>
+    param([Parameter(Mandatory)][string]$Adb)
+
+    $booted = ((& $Adb -s $script:AdbTarget shell getprop sys.boot_completed 2>&1) -join '').Trim()
+    if ($booted -ne '1') { return $false }
+
+    $verifier = ((& $Adb -s $script:AdbTarget shell pidof com.microsoft.windows.userapp 2>&1) -join '').Trim()
+    $verifier -match '^\d+'
+}
+
+function Wait-WsaFramework {
+    <#
+      WSA leaves the Android framework parked until an app is actually
+      launched - zygote, system_server and the APK verifier can start minutes
+      after the VM itself. Launching any app is what drives the rest of the
+      boot, so poke the WSA app again if nothing has come up yet.
+    #>
+    param([Parameter(Mandatory)][string]$Adb, [int]$TimeoutSeconds = 300)
+
+    if (Test-WsaFrameworkReady -Adb $Adb) {
+        Write-Ok 'Android framework is up - APK installs will work'
+        return $true
+    }
+
+    Write-Info 'The VM is up but the Android framework is not; launching the app to finish the boot'
+    Start-Process $script:AppAumid
+
+    $test  = { Test-WsaFrameworkReady -Adb $Adb }.GetNewClosure()
+    $ready = Wait-WithStatus -Message 'Waiting for the Android framework (the APK verifier lives here)' `
+                             -TimeoutSeconds $TimeoutSeconds -IntervalSeconds 5 -Test $test
+    if ($ready) {
+        Write-Ok 'Android framework is up - APK installs will work'
+        return $true
+    }
+
+    Write-Warn "The Android framework did not finish booting within $TimeoutSeconds seconds."
+    Write-Warn 'Until it does, every install fails with INSTALL_FAILED_VERIFICATION_FAILURE after'
+    Write-Warn 'a 120 second stall. Open any Android app to finish the boot, then retry.'
     $false
 }
